@@ -29,5 +29,34 @@
     <li>Study 3: Innovative approaches to diabetes treatment.</li>
   </ul>
 </main>
+<script>
+function getUserId() {
+  return 'user-' + Math.floor(Math.random() * 1000000);
+}
+async function sendClickEvent(event) {
+  const clickEvent = {
+    user_id: getUserId(),
+    page: window.location.pathname,
+    event_type: event.type,
+    timestamp: new Date().toISOString(),
+    element: `${event.target.tagName}#${event.target.id || event.target.className || 'unknown'}`
+  };
+  try {
+    await fetch('https://your-backend-api.com/clickstream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(clickEvent),
+      keepalive: true,
+    });
+  } catch (err) {
+    console.error('Click event sending failed:', err);
+  }
+}
+
+document.querySelectorAll('nav a').forEach(link => {
+  link.addEventListener('click', async (event) => {
+    await sendClickEvent(event);
+  });
+});
 </body>
 </html>
