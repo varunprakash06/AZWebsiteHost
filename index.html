@@ -40,12 +40,10 @@
 </main>
 
 <script>
-// Generate user/session ID
 function getUserId() {
   return 'user-' + Math.floor(Math.random() * 1000000);
 }
 
-// Send click event to backend API
 async function sendClickEvent(event) {
   const clickEvent = {
     user_id: getUserId(),
@@ -66,7 +64,7 @@ async function sendClickEvent(event) {
   }
 }
 
-// Attach click listeners to buttons and navigate after sending event
+// Track button clicks
 document.querySelectorAll('button').forEach(btn => {
   btn.addEventListener('click', async (event) => {
     await sendClickEvent(event);
@@ -75,6 +73,14 @@ document.querySelectorAll('button').forEach(btn => {
     else if (event.target.id === "btnResearch") window.location.href = 'research.html';
   });
 });
+
+// Track navigation link clicks
+document.querySelectorAll('nav a').forEach(link => {
+  link.addEventListener('click', async (event) => {
+    await sendClickEvent(event);
+  });
+});
 </script>
+
 </body>
 </html>
