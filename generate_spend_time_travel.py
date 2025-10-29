@@ -16,7 +16,7 @@ N_UPDATE = 600
 N_UNCHANGED = N_CARRY - N_UPDATE     # 900 unchanged
 N_DELETE = 300                       # present only in BEFORE
 
-# Pools and dictionaries derived from your sample
+# Pools
 SOURCES = ["SAP", "Oracle", "NetSuite", "Workday", "Custom"]
 SPEND_CHANNEL_NM_POOL = ["Digital", "Traditional", "Hybrid", "Direct", "Partner"]
 SPEND_CHANNEL_CD_POOL = ["DIG", "TRD", "HYB", "DIR"]
@@ -58,8 +58,9 @@ SPEND_STATUS_DESC_MAP = {
     "REJECTED": "REJECTED"
 }
 
-# Columns for output (wide subset reflecting your schema)
+# Columns for output (wide subset + lineage tags)
 COLS = [
+    "SNAPSHOT_TYPE","CHANGE_TYPE",   # lineage tags
     "SPND_ID","EXPENSE_ID","PARENT_EXPENSE_ID",
     "AZ_CUST_ID","SRC_CUST_ID","CUST_SRC_SYS","SOURCE_SYSTEM_NM",
     "REC_SYS_CD","RECORD_COMPANY_CD","SPEND_TXNMY_ID","AZ_PROD_ID",
@@ -93,7 +94,7 @@ COLS = [
     "RECIPIENT_TYPE","RECIPIENT_IDENTIFIER","RECIPIENT_NAME","RECIPIENT_COUNTRY_CD"
 ]
 
-# Null probabilities per column (adjust as needed; keys kept non-null)
+# Null probabilities per column (keys kept non-null)
 NULL_RATES = {
     "AUTHOR_EMAIL": 0.05,
     "AUTHOR_FULL_NM": 0.03,
@@ -171,17 +172,18 @@ def maybe_null(row):
             row[c] = None
     return row
 
-def hash_row(row):
-    s = "|".join("" if row.get(c) is None else str(row.get(c, "")) for c in COLS)
+def hash_row(row, cols):
+    s = "|".join("" if row.get(c) is None else str(row.get(c, "")) for c in cols)
     return hashlib.md5(s.encode("utf-8")).hexdigest()
 
 # ------------------------------
 # Row construction
 # ------------------------------
-def make_row(spnd_id=None, exp_id=None, parent_id=None):
+def make_row(spnd_id=None, exp_id=None, parent_id=None, az_cust_id=None):
     spnd_id = spnd_id or mk_id("SPND")
     exp_id = exp_id or mk_id("EXP")
     parent_id = parent_id or mk_id("PEXP")
+    az_cust_id = az_cust_id or mk_id("CUST")
     spend_amt, usd_amt, eur_amt = mk_money()
     status_cd = random.choice(STATUS_CD_POOL)
     status_desc = status_desc_from_cd(status_cd)
@@ -193,7 +195,6 @@ def make_row(spnd_id=None, exp_id=None, parent_id=None):
     region = random.choice(REGIONS)
     country_cd = mk_country()
 
-    # Dates with logical ordering
     submit_dt = rand_date()
     start_dt_dt = datetime.strptime(rand_date(), "%Y-%m-%d")
     end_dt_dt = start_dt_dt + timedelta(days=random.randint(0, 10))
@@ -203,7 +204,7 @@ def make_row(spnd_id=None, exp_id=None, parent_id=None):
         "SPND_ID": spnd_id,
         "EXPENSE_ID": exp_id,
         "PARENT_EXPENSE_ID": parent_id,
-        "AZ_CUST_ID": mk_id("CUST"),
+        "AZ_CUST_ID": az_cust_id,
         "SRC_CUST_ID": mk_id("SRC"),
         "CUST_SRC_SYS": random.choice(SOURCES),
         "SOURCE_SYSTEM_NM": random.choice(["Event 2024","Training 2023","Conference 2021","Meeting 2019","Workshop 2025"]),
@@ -389,38 +390,36 @@ def make_row(spnd_id=None, exp_id=None, parent_id=None):
     row = maybe_null(row)
     return row
 
-def apply_update(r):
+def apply_update_with_new_ids(r):
+    # Create AFTER version with new SPND_ID and EXPENSE_ID, same AZ_CUST_ID
     r2 = dict(r)
+    r2["SPND_ID"] = mk_id("SPND")
+    r2["EXPENSE_ID"] = mk_id("EXP")
+    # Keep same PARENT_EXPENSE_ID (optional; change if needed)
     drift = 1 + random.uniform(-0.07, 0.07)
 
-    # Monetary fields (guard if null)
     for amt_col in ["SPEND_AMOUNT","USD_SPEND_AMOUNT","EUR_SPEND_AMOUNT",
                     "RPTBL_SPEND_AMOUNT","DOCUMENT_PAY_AMOUNT",
                     "SPD_AMT_PRE_ALLOC","SPD_AMT_TOTAL_PARTICIPANTS","SPD_AMT_TOTAL_LIC_HCPS","SPD_AMT_TOTAL_PRESCRIBERS"]:
         if r2.get(amt_col) is not None:
             r2[amt_col] = round(float(r2[amt_col]) * drift, 2)
 
-    # Status flip
     r2["SPEND_STATUS_CD"] = random.choice(STATUS_CD_POOL)
     r2["SPEND_STATUS_DESC"] = status_desc_from_cd(r2["SPEND_STATUS_CD"])
 
-    # Shift dates only if present
     for dt_col in ["ROW_UPDT_DT","SPEND_DATE","SUBMIT_DT","START_DT","END_DT","PAYMENT_DT","LAST_MODIFIED_DT","CONTRACT_DT","DER_SHIPPED_DATE","CREATEDONDATE_ORDERDATE"]:
         if r2.get(dt_col):
             try:
                 dt = datetime.strptime(r2[dt_col], "%Y-%m-%d")
                 r2[dt_col] = (dt + timedelta(days=random.randint(1,30))).strftime("%Y-%m-%d")
             except Exception:
-                # If parsing fails, leave as-is
                 pass
 
-    # Minor text append
     if r2.get("LONG_NOTES"):
         r2["LONG_NOTES"] = (r2["LONG_NOTES"] + " | Restated per policy").strip(" |")
     else:
         r2["LONG_NOTES"] = "Restated per policy"
 
-    # Occasional categorical change
     r2["SPEND_CHANNEL_NM"] = random.choice(SPEND_CHANNEL_NM_POOL)
     r2["SPEND_CHANNEL_CD"] = random.choice(SPEND_CHANNEL_CD_POOL)
     r2["ACTIVITY_TYPE_NM"] = random.choice(ACTIVITY_TYPES)
@@ -431,7 +430,7 @@ def apply_update(r):
     return r2
 
 # ------------------------------
-# Build BEFORE and AFTER
+# Build merged output
 # ------------------------------
 before_rows = []
 carry_rows = []
@@ -441,71 +440,70 @@ for _ in range(N_CARRY):
     before_rows.append(r)
 
 for _ in range(N_DELETE):
-    before_rows.append(make_row())  # will be deleted (not carried)
+    before_rows.append(make_row())  # DELETEs: appear only as BEFORE
 
-# AFTER: unchanged + updated + inserts
-after_rows = []
+merged_rows = []
 
-# Unchanged subset
+# UNCHANGED: add BEFORE and AFTER with same IDs
 unchanged = random.sample(carry_rows, N_UNCHANGED)
-after_rows.extend(unchanged)
+for r in unchanged:
+    rb = dict(r)
+    rb["SNAPSHOT_TYPE"] = "BEFORE"
+    rb["CHANGE_TYPE"] = "UNCHANGED"
+    merged_rows.append(rb)
 
-# Updated subset
+    ra = dict(r)
+    ra["SNAPSHOT_TYPE"] = "AFTER"
+    ra["CHANGE_TYPE"] = "UNCHANGED"
+    merged_rows.append(ra)
+
+# UPDATED: add BEFORE, then AFTER with new SPND_ID/EXPENSE_ID (same AZ_CUST_ID)
 remaining_for_update = [r for r in carry_rows if r not in unchanged]
 updated = random.sample(remaining_for_update, N_UPDATE)
-after_rows.extend(apply_update(r) for r in updated)
+for r in updated:
+    rb = dict(r)
+    rb["SNAPSHOT_TYPE"] = "BEFORE"
+    rb["CHANGE_TYPE"] = "UPDATE"
+    merged_rows.append(rb)
 
-# Inserts
+    ra = apply_update_with_new_ids(r)
+    ra["SNAPSHOT_TYPE"] = "AFTER"
+    ra["CHANGE_TYPE"] = "UPDATE"
+    # Ensure AZ_CUST_ID carried over
+    ra["AZ_CUST_ID"] = r["AZ_CUST_ID"]
+    merged_rows.append(ra)
+
+# INSERTS: AFTER only (new rows). If you want to reuse existing AZ_CUST_IDs, sample from carry_rows.
 for _ in range(N_INSERT):
-    after_rows.append(make_row())
+    # Option A: brand-new customer
+    ra = make_row()
+    # Option B (reuse AZ_CUST_ID): uncomment the next two lines
+    # seed = random.choice(carry_rows)
+    # ra["AZ_CUST_ID"] = seed["AZ_CUST_ID"]
+    ra["SNAPSHOT_TYPE"] = "AFTER"
+    ra["CHANGE_TYPE"] = "INSERT"
+    merged_rows.append(ra)
+
+# DELETES: BEFORE only
+for r in before_rows[N_CARRY:]:
+    rb = dict(r)
+    rb["SNAPSHOT_TYPE"] = "BEFORE"
+    rb["CHANGE_TYPE"] = "DELETE"
+    merged_rows.append(rb)
 
 # ------------------------------
-# Changes ledger
+# Write single CSV
 # ------------------------------
-def idx(rows):
-    return {r["SPND_ID"]: r for r in rows}
-
-b_idx = idx(before_rows)
-a_idx = idx(after_rows)
-
-changes = []
-all_keys = set(b_idx.keys()) | set(a_idx.keys())
-for k in all_keys:
-    b = b_idx.get(k)
-    a = a_idx.get(k)
-    if b and not a:
-        changes.append({"SPND_ID":k,"CHANGE_TYPE":"DELETE","BEFORE_HASH":hash_row(b),"AFTER_HASH":"","CHANGED_COLUMNS":""})
-    elif a and not b:
-        changes.append({"SPND_ID":k,"CHANGE_TYPE":"INSERT","BEFORE_HASH":"","AFTER_HASH":hash_row(a),"CHANGED_COLUMNS":""})
-    else:
-        hb, ha = hash_row(b), hash_row(a)
-        if hb == ha:
-            changes.append({"SPND_ID":k,"CHANGE_TYPE":"UNCHANGED","BEFORE_HASH":hb,"AFTER_HASH":ha,"CHANGED_COLUMNS":""})
-        else:
-            changed_cols = [c for c in COLS if ("" if b.get(c) is None else str(b.get(c,""))) != ("" if a.get(c) is None else str(a.get(c,"")))]
-            changes.append({"SPND_ID":k,"CHANGE_TYPE":"UPDATE","BEFORE_HASH":hb,"AFTER_HASH":ha,"CHANGED_COLUMNS":",".join(changed_cols)})
-
-# ------------------------------
-# Write CSVs
-# ------------------------------
-with open("spend_before.csv","w",newline="",encoding="utf-8") as f:
+with open("spend_merged.csv","w",newline="",encoding="utf-8") as f:
     w = csv.DictWriter(f, fieldnames=COLS)
     w.writeheader()
-    for r in before_rows:
+    for r in merged_rows:
         w.writerow(r)
 
-with open("spend_after.csv","w",newline="",encoding="utf-8") as f:
-    w = csv.DictWriter(f, fieldnames=COLS)
-    w.writeheader()
-    for r in after_rows:
-        w.writerow(r)
-
-with open("spend_changes.csv","w",newline="",encoding="utf-8") as f:
-    w = csv.DictWriter(f, fieldnames=["SPND_ID","CHANGE_TYPE","BEFORE_HASH","AFTER_HASH","CHANGED_COLUMNS"])
-    w.writeheader()
-    for c in changes:
-        w.writerow(c)
-
-print("Generated spend_before.csv (~{} rows), spend_after.csv ({} rows), spend_changes.csv (~{} rows)".format(
-    len(before_rows), len(after_rows), len(changes)
-))
+print(f"Generated spend_merged.csv with {len(merged_rows)} rows. Composition:")
+print(f"  BEFORE rows: {sum(1 for r in merged_rows if r['SNAPSHOT_TYPE']=='BEFORE')}")
+print(f"  AFTER rows:  {sum(1 for r in merged_rows if r['SNAPSHOT_TYPE']=='AFTER')}")
+print(f"  INSERT:      {sum(1 for r in merged_rows if r['CHANGE_TYPE']=='INSERT')}")
+print(f"  DELETE:      {sum(1 for r in merged_rows if r['CHANGE_TYPE']=='DELETE')}")
+print(f"  UPDATE pairs:{len(updated)} (2 rows each)")
+print(f"  UNCHANGED pairs:{len(unchanged)} (2 rows each)")
